@@ -1,3 +1,4 @@
+HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
