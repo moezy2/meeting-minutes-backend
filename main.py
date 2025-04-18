@@ -11,14 +11,13 @@ from datetime import datetime
 
 app = FastAPI(title="Meeting Minutes API")
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For production, specify the actual frontend domain
+    allow_origins=["https://meeting-minutes-frontend.vercel.app/"],  # Add your frontend URL here
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-)
+) 
 
 # In-memory storage (would use a database in production)
 transcripts = {}
