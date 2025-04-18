@@ -1,3 +1,4 @@
+import os
 HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -5,7 +6,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import requests
 import json
-import os
+
 import uuid
 import time
 from datetime import datetime
