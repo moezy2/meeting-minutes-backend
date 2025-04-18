@@ -28,7 +28,7 @@ summaries = {}
 
 # Hugging Face API endpoints
 HF_ASR_API = "https://api-inference.huggingface.co/models/openai/whisper-large-v3"
-HF_LLM_API = "https://api-inference.huggingface.co/models/google/gemma-7b-it"
+HF_LLM_API = "https://api-inference.huggingface.co/models/google/gemma-2b-it"
 
 class TranscriptRequest(BaseModel):
     audio_url: str
