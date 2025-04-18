@@ -1,14 +1,15 @@
 import os
+import time # Ensure time is imported
 HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional # Dict is imported here
+from typing import List, Dict, Any, Optional # Ensure Dict is imported
 import requests
 import json
 
 import uuid
-import time
+# Removed redundant time import here as it's at the top
 from datetime import datetime
 
 app = FastAPI(title="Meeting Minutes API")
@@ -64,23 +65,29 @@ async def process_audio(file: UploadFile = File(...), background_tasks: Backgrou
     with open(file_location, "wb") as f:
         f.write(await file.read())
 
-    # Process in background
+    # Capture the browser’s content type (e.g. audio/wav or audio/webm) <-- Patch 1 Start
+    content_type = file.content_type
+
+    # Process in background (passing content_type)
     if background_tasks:
-        background_tasks.add_task(process_audio_file, file_location, transcript_id)
+        background_tasks.add_task(process_audio_file, file_location, transcript_id, content_type)
     else:
         # For testing, process synchronously
-        await process_audio_file(file_location, transcript_id)
+        await process_audio_file(file_location, transcript_id, content_type)
+    # <-- Patch 1 End
 
     return {"transcript_id": transcript_id, "status": "processing"}
 
-async def process_audio_file(file_path: str, transcript_id: str):
+# Updated function signature <-- Patch 2
+async def process_audio_file(file_path: str, transcript_id: str, content_type: str):
     """Process audio file using Hugging Face Whisper API"""
     try:
         # Read the audio file
         with open(file_path, "rb") as f:
             data = f.read()
 
-        # === Sanity checks and logging ===  <- This block replaces the old headers/requests.post
+        # <-- Patch 3 Start: Replaced block for headers, retry logic, and API call
+        # === Sanity checks & dynamic content‑type ===
         print(f"[whisper] HF_API_TOKEN set: {bool(HF_API_TOKEN)}")
 
         headers: Dict[str, str] = {}
@@ -90,25 +97,45 @@ async def process_audio_file(file_path: str, transcript_id: str):
         else:
             print("[whisper] ⚠️ No HF_API_TOKEN provided; calling without auth")
 
-        # Ensure correct content type for audio (adjust if not WAV)
-        # Assuming WAV based on common usage, adjust header if your audio format differs
-        headers["Content-Type"] = f"audio/{file_path.split('.')[-1]}" # Dynamically set content-type based on extension
-        print(f"[whisper] Setting Content-Type: {headers['Content-Type']}")
+        # Use the real MIME type from the UploadFile
+        headers["Content-Type"] = content_type
+        print(f"[whisper] Setting Content-Type: {content_type}")
 
+        # ==== Retry loop for transient 503s ====
+        max_retries = 3
+        response = None # Initialize response
+        attempt = 0 # Initialize attempt counter
+        for attempt in range(1, max_retries + 1):
+            response = requests.post(
+                HF_ASR_API,
+                headers=headers,
+                data=data
+            )
+            print(f"[whisper] attempt {attempt} status={response.status_code}")
+            if response.status_code == 200:
+                break # Success! Exit loop.
+            # Check for 503 AND if retries are left
+            if response.status_code == 503 and attempt < max_retries:
+                backoff = 2 ** attempt # Exponential backoff: 2, 4, 8 seconds
+                print(f"[whisper] 503 Service Unavailable; retrying in {backoff}s")
+                time.sleep(backoff) # Wait before retrying
+            else:
+                # If it's not 503, or if it's 503 on the last attempt, break the loop.
+                # The status check after the loop will handle the failure.
+                break
 
-        response = requests.post(
-            HF_ASR_API,
-            headers=headers,
-            data=data
-        )
+        # Log snippet of response body (always log the final attempt's body)
+        if response: # Check if response object exists
+             print(f"[whisper] body={response.text[:200]}…")
+        else:
+             print("[whisper] No response received after retries.")
+        # <-- Patch 3 End
 
-        # Log status + first 200 chars of response body
-        print(f"[whisper] status={response.status_code} body={response.text[:200]}…")
-        # === End of replaced block ===
-
-
-        if response.status_code != 200:
-            error_detail = f"Transcription failed: Status {response.status_code}, Body: {response.text}"
+        # Check the final response status code AFTER the loop
+        if response is None or response.status_code != 200:
+            status_code = response.status_code if response else 'N/A'
+            response_text = response.text if response else 'No response'
+            error_detail = f"Transcription failed after {attempt} attempt(s): Status {status_code}, Body: {response_text}"
             print(f"[whisper] Error: {error_detail}") # Log the full error
             transcripts[transcript_id] = {
                 "error": error_detail,
@@ -129,7 +156,13 @@ async def process_audio_file(file_path: str, transcript_id: str):
 
         # Simple rule-based speaker assignment for demonstration
         text = result.get("text", "")
+        # Handle potential None or empty text robustly
+        if not text:
+             print("[whisper] Warning: Received empty text from Whisper API.")
+             text = "" # Ensure text is a string for split
+
         sentences = text.split(". ")
+
 
         current_time = 0
         for i, sentence in enumerate(sentences):
@@ -222,9 +255,18 @@ async def generate_meeting_minutes(transcript_id: str, summary_id: str):
 
         # Prepare the transcript text
         transcript_text = ""
-        for segment in transcript["segments"]:
-            speaker_name = next((s["name"] for s in transcript["speakers"] if s["id"] == segment["speaker"]), "Unknown")
-            transcript_text += f"{speaker_name}: {segment['text']}\n"
+        for segment in transcript.get("segments", []): # Add default empty list
+            speaker_name = next((s["name"] for s in transcript.get("speakers", []) if s["id"] == segment.get("speaker")), "Unknown") # Add defaults
+            transcript_text += f"{speaker_name}: {segment.get('text', '')}\n" # Add default
+
+        # Check if transcript_text is empty (e.g., Whisper failed silently or returned no text)
+        if not transcript_text.strip():
+             print(f"[llm] Transcript text for {transcript_id} is empty. Skipping summary generation.")
+             summaries[summary_id] = {
+                "error": "Cannot generate summary from empty transcript.",
+                "status": "failed"
+             }
+             return
 
         # Prepare the prompt for the LLM
         prompt = f"""
@@ -387,23 +429,23 @@ def export_summary(summary_id: str, format: str):
 
         # Summary Section
         markdown += "## Summary\n\n"
-        for block in summary.get("Summary", {}).get("blocks", []):
-            markdown += f"- {block.get('content', '')}\n"
+        for block in summary.get("Summary", {}).get("blocks", []): # Added defaults
+            markdown += f"- {block.get('content', '')}\n" # Added default
 
         # Actions Section
         markdown += "\n## Actions\n\n"
-        for block in summary.get("Actions", {}).get("blocks", []):
-            markdown += f"- {block.get('content', '')}\n"
+        for block in summary.get("Actions", {}).get("blocks", []): # Added defaults
+            markdown += f"- {block.get('content', '')}\n" # Added default
 
         # Decisions Section
         markdown += "\n## Decisions\n\n"
-        for block in summary.get("Decisions", {}).get("blocks", []):
-            markdown += f"- {block.get('content', '')}\n"
+        for block in summary.get("Decisions", {}).get("blocks", []): # Added defaults
+            markdown += f"- {block.get('content', '')}\n" # Added default
 
         # Detailed Notes Section
         markdown += "\n## Detailed Notes\n\n"
-        for block in summary.get("DetailedNotes", {}).get("blocks", []):
-            markdown += f"- {block.get('content', '')}\n"
+        for block in summary.get("DetailedNotes", {}).get("blocks", []): # Added defaults
+            markdown += f"- {block.get('content', '')}\n" # Added default
 
         return {"content": markdown, "format": "markdown"}
 
@@ -416,5 +458,5 @@ def export_summary(summary_id: str, format: str):
 
 if __name__ == "__main__":
     import uvicorn
-    # Recommended: Add reload=True for development
+    # Recommended: Add reload=True for development, ensure app points to correct object
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) # Assuming filename is main.py
