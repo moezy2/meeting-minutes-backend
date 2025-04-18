@@ -13,7 +13,7 @@ app = FastAPI(title="Meeting Minutes API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://meeting-minutes-frontend.vercel.app/"],  # Add your frontend URL here
+    allow_origins=["https://meeting-minutes-frontend.vercel.app"],  # Add your frontend URL here
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
